@@ -128,7 +128,7 @@ function RootControllers(props: { workspaces?: WorkspacesService; sessions?: Ses
 
 export const KanbanFlowPlugin = {
   name: "dsh-kanban-flow",
-  inject: ["slots"],
+  inject: ["slots", "workspaces", "sessions"],
   apply(ctx: any) {
     const slots = ctx.get("slots")
     if (slots === undefined) return
