@@ -261,6 +261,7 @@ export function KanbanBoard(props: KanbanBoardProps) {
   const [board, setBoard] = useState<Board | null>(null)
   const [error, setError] = useState("")
   const [warnings, setWarnings] = useState<string[]>([])
+  const [stale, setStale] = useState(false)
   const [dialog, setDialog] = useState<{ item: Item | null; columnId: ColumnId } | null>(null)
   const [adding, setAdding] = useState<ColumnId | null>(null)
   const [codeDialog, setCodeDialog] = useState(false)
@@ -295,11 +296,12 @@ export function KanbanBoard(props: KanbanBoardProps) {
         prevItemsRef.current = new Map(next.items.map((i) => [i.id, i.columnId + "|" + i.name + "|" + i.description]))
         setBoard(next)
         setError("")
+        setStale(res.stale === true)
         notifyBoard(workspaceId, next)
       }
       if (res && typeof res.error === "string" && res.error) setError(res.error)
       if (Array.isArray(res && res.warnings) && res.warnings.length > 0) {
-        setWarnings((w) => [...w, ...res.warnings])
+        setWarnings((w) => Array.from(new Set([...w, ...res.warnings])))
       }
     },
     [workspaceId],
@@ -481,6 +483,11 @@ export function KanbanBoard(props: KanbanBoardProps) {
         </div>
       )}
       {header}
+      {stale && (
+        <div className="kf-warning">
+          The board file is unreachable. Showing the last loaded board; changes are disabled until it is reachable again.
+        </div>
+      )}
       {error && <div className="kf-error kf-loading">{error}</div>}
       {board ? (
         <DndContext sensors={sensors} collisionDetection={combinationCollision} onDragStart={onDragStart} onDragOver={onDragOver as any} onDragEnd={onDragEnd}>

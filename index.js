@@ -11,17 +11,15 @@
  *  - Browser data layer at /api/kanban-flow via ctx.get('webServer')
  *  - Workflow state machine enforcement with actor tracking (human vs agent)
  *
- * Board schema lives in lib/core.js (schemaVersion 1).
+ * Board schema lives in lib/core.js; file loading, revalidation and
+ * conditional writes live in lib/board-store.js.
  */
 import {
-  SCHEMA_VERSION,
   COLUMN_IDS,
   COLUMN_TITLES,
-  parseBoardText,
-  emptyBoard,
-  cloneBoard,
   summarizeBoard,
   workflowRules,
+  cloneBoard,
   createItem,
   updateItem,
   deleteItem,
@@ -31,22 +29,47 @@ import {
   setStatus,
   deriveCode,
 } from './lib/core.js'
+import { BoardUnavailableError, createBoardStore } from './lib/board-store.js'
 
 export const name = 'dsh-kanban-flow'
 export const inject = ['tools']
 
-const BOARD_FILE = '.dsh-kanban-flow.json'
+/** Read-only dispatch methods; everything else mutates through the store. */
+const READ_METHODS = new Set(['get', 'getMeta', 'getItem'])
+
+/**
+ * Board mutations keyed by dispatch method. Each runs on a private copy of
+ * the fresh board and may be replayed after a write conflict, so it must be
+ * a pure function of (board, args, actor).
+ */
+const MUTATIONS = {
+  createItem: (board, a, actor) => createItem(board, { name: a.name, description: a.description, columnId: a.columnId, actor }),
+  updateItem: (board, a, actor) => updateItem(board, { id: a.id, name: a.name, description: a.description, actor }),
+  deleteItem: (board, a, actor) => deleteItem(board, String(a.id || ''), actor),
+  moveItem: (board, a, actor) => {
+    const r = moveItem(board, { id: a.id, toColumn: a.toColumn, actor })
+    if (!r.error && typeof a.sessionId === 'string' && a.sessionId) {
+      const item = board.items.find((i) => i.id === a.id)
+      if (item && !item.sessionId) item.sessionId = a.sessionId
+    }
+    return r
+  },
+  setSession: (board, a) => {
+    const item = board.items.find((i) => i.id === String(a.id || ''))
+    if (!item) return { error: 'Item not found: ' + String(a.id || '') }
+    item.sessionId = String(a.sessionId || '') || null
+    return { message: 'Session linked to ' + item.id }
+  },
+  setCode: (board, a) => setCode(board, String(a.code || ''), true),
+  setStatus: (board, a, actor) => setStatus(board, { id: String(a.id || ''), note: a.note, actor }),
+  setConfirmRequired: (board, a) => setConfirmRequired(board, a.value === true),
+}
 
 export function apply(ctx) {
   const getFs = () => ctx.get('fs')
   const getPolicy = () => ctx.get('sandboxPolicy')
   const getWorkspaceRegistry = () => ctx.get('workspaceRegistry')
 
-  const boards = new Map() // workspaceKey -> board object
-  const fileTargets = new Map() // workspaceKey -> FsTarget | null
-  const meta = new Map() // workspaceKey -> { warnings: [] }
-
-  const workspaceKey = (workspace) => String(workspace.id || workspace.path)
   const writePolicyFor = (workspace, session) => {
     const policy = getPolicy()
     const resolved =
@@ -55,193 +78,73 @@ export function apply(ctx) {
         : { mode: (policy && policy.defaultMode) || 'workspace-write' }
     return { ...resolved, workspaceRoot: workspace.path }
   }
-  const resolveFile = async (workspace) => {
-    const fs = getFs()
-    if (!fs) return null
-    try {
-      return await fs.resolve(BOARD_FILE, { cwd: workspace.path })
-    } catch (err) {
-      console.log('dsh-kanban-flow: failed to resolve board file for ' + workspaceKey(workspace) + ': ' + ((err && err.message) || err))
-      return null
-    }
-  }
-  const targetOf = async (workspace) => {
-    const key = workspaceKey(workspace)
-    if (!fileTargets.has(key)) fileTargets.set(key, await resolveFile(workspace))
-    return fileTargets.get(key)
-  }
-  const persistedFlag = (workspace) => {
-    const key = workspaceKey(workspace)
-    return fileTargets.has(key) && fileTargets.get(key) !== null
-  }
 
-  const backupFile = async (workspace, suffix, session) => {
-    const fs = getFs()
-    const target = await targetOf(workspace)
-    if (!fs || !target) return null
-    try {
-      const text = await fs.readText(target)
-      const backupTarget = await fs.resolve(BOARD_FILE + '.' + suffix, { cwd: workspace.path })
-      await fs.writeText(backupTarget, text, undefined, undefined, writePolicyFor(workspace, session))
-      return backupTarget
-    } catch (err) {
-      console.log('dsh-kanban-flow: backup failed (' + suffix + '): ' + ((err && err.message) || err))
-      return null
-    }
-  }
-
-  const warn = (workspace, message) => {
-    const key = workspaceKey(workspace)
-    if (!meta.has(key)) meta.set(key, { warnings: [] })
-    meta.get(key).warnings.push(message)
-    console.log('dsh-kanban-flow: ' + message)
-  }
-  const takeWarnings = (workspace) => {
-    const key = workspaceKey(workspace)
-    const m = meta.get(key)
-    if (!m) return []
-    const w = m.warnings
-    m.warnings = []
-    return w
-  }
-  const timestamp = () => new Date().toISOString().replace(/[:.]/g, '-')
-
-  const boardOf = async (workspace, session) => {
-    const key = workspaceKey(workspace)
-    let board = boards.get(key)
-    if (board) return board
-    board = emptyBoard(deriveCode(workspace.title || key))
-    boards.set(key, board)
-    const fs = getFs()
-    const target = await targetOf(workspace)
-    let migrated = false
-    if (fs && target) {
-      try {
-        const text = await fs.readText(target)
-        const parsed = parseBoardText(text)
-        for (const w of parsed.warnings) warn(workspace, w)
-        if (parsed.ok) {
-          Object.assign(board, parsed.data)
-          migrated = parsed.migrated
-          if (parsed.migrated) await backupFile(workspace, 'bak-v' + parsed.fromVersion, session)
-        } else {
-          const suffix = parsed.kind === 'unsupported' ? 'unsupported-v' + parsed.version : 'corrupt-' + timestamp()
-          await backupFile(workspace, suffix, session)
-        }
-      } catch (err) {
-        console.log('dsh-kanban-flow: read failed for ' + key + ': ' + ((err && err.message) || err))
-      }
-    }
-    if (migrated && fs && target) await save(workspace, session)
-    return board
-  }
-
-  const save = async (workspace, session) => {
-    const fs = getFs()
-    const target = await targetOf(workspace)
-    const key = workspaceKey(workspace)
-    const board = boards.get(key)
-    if (!fs || !target || !board) return
-    try {
-      await fs.writeText(
-        target,
-        JSON.stringify({ schemaVersion: SCHEMA_VERSION, ...cloneBoard(board) }),
-        undefined,
-        undefined,
-        writePolicyFor(workspace, session),
-      )
-    } catch (err) {
-      console.log('dsh-kanban-flow: save failed for ' + key + ': ' + ((err && err.message) || err))
-    }
-  }
+  const store = createBoardStore({
+    getFs,
+    writePolicyFor,
+    initialCode: (workspace) => deriveCode(workspace.title || workspace.path || ''),
+  })
 
   // ---- shared dispatch: tools (agent) and HTTP (human) ----
   const dispatch = async (workspace, method, args, source, session) => {
-    const board = await boardOf(workspace, session)
     const a = args || {}
     const actor = source === 'agent' ? 'agent' : 'human'
-    const ok = (extra) => ({
-      ok: true,
-      board: cloneBoard(board),
-      persisted: persistedFlag(workspace),
-      warnings: takeWarnings(workspace),
-      ...extra,
-    })
-    const fail = (error) => ({ ok: false, error, board: cloneBoard(board), warnings: takeWarnings(workspace) })
+    // An unavailable board answers without a `board` field: clients keep
+    // showing what they had instead of an empty placeholder.
+    const unavailable = (err) => ({ ok: false, unavailable: true, error: err.message, warnings: [] })
+
+    if (READ_METHODS.has(method)) {
+      let snap
+      try {
+        snap = await store.read(workspace, session)
+      } catch (err) {
+        if (err instanceof BoardUnavailableError) return unavailable(err)
+        throw err
+      }
+      const board = snap.board
+      const ok = (extra) => ({ ok: true, board: cloneBoard(board), persisted: snap.persisted, stale: snap.stale, warnings: snap.warnings, ...extra })
+      const fail = (error) => ({ ok: false, error, board: cloneBoard(board), stale: snap.stale, warnings: snap.warnings })
+      switch (method) {
+        case 'get':
+          return ok({ message: 'Board loaded', summary: summarizeBoard(board) })
+        case 'getMeta':
+          return ok({
+            message: 'Meta loaded',
+            meta: { code: board.code, codeConfirmed: board.codeConfirmed === true, confirmRequired: !!(board.settings && board.settings.confirmRequired), derived: deriveCode(workspace.title || String(workspace.id || workspace.path)) },
+          })
+        case 'getItem': {
+          const item = board.items.find((i) => i.id === String(a.id || ''))
+          if (!item) return fail('Item not found: ' + String(a.id || ''))
+          return ok({ item, message: 'Item ' + item.id })
+        }
+      }
+    }
+
+    const mutation = MUTATIONS[method]
+    if (!mutation) return { ok: false, error: 'Unknown kanban-flow method: ' + method, warnings: [] }
 
     // Actor-based guards live HERE (the single choke point every caller goes
     // through — tool wrapper, HTTP route, future callers alike).
     if (actor === 'agent' && method === 'createItem' && a.columnId === 'todo') {
-      return fail('Move rejected: agents never place items into To Do. Create in Backlog and let the human triage.')
+      return { ok: false, error: 'Move rejected: agents never place items into To Do. Create in Backlog and let the human triage.', warnings: [] }
     }
 
-    switch (method) {
-      case 'get':
-        return ok({ message: 'Board loaded', summary: summarizeBoard(board) })
-      case 'getMeta':
-        return ok({
-          message: 'Meta loaded',
-          meta: { code: board.code, codeConfirmed: board.codeConfirmed === true, confirmRequired: !!(board.settings && board.settings.confirmRequired), derived: deriveCode(workspace.title || workspaceKey(workspace)) },
-        })
-      case 'getItem': {
-        const item = board.items.find((i) => i.id === String(a.id || ''))
-        if (!item) return fail('Item not found: ' + String(a.id || ''))
-        return ok({ item, message: 'Item ' + item.id })
-      }
-      case 'createItem': {
-        const r = createItem(board, { name: a.name, description: a.description, columnId: a.columnId, actor })
-        if (r.error) return fail(r.error)
-        await save(workspace, session)
-        return ok({ item: r.item, message: r.message })
-      }
-      case 'updateItem': {
-        const r = updateItem(board, { id: a.id, name: a.name, description: a.description, actor })
-        if (r.error) return fail(r.error)
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      case 'deleteItem': {
-        const r = deleteItem(board, String(a.id || ''), actor)
-        if (r.error) return fail(r.error)
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      case 'moveItem': {
-        const r = moveItem(board, { id: a.id, toColumn: a.toColumn, actor })
-        if (r.error) return fail(r.error)
-        if (typeof a.sessionId === 'string' && a.sessionId) {
-          const item = board.items.find((i) => i.id === a.id)
-          if (item && !item.sessionId) item.sessionId = a.sessionId
-        }
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      case 'setSession': {
-        const item = board.items.find((i) => i.id === String(a.id || ''))
-        if (!item) return fail('Item not found: ' + String(a.id || ''))
-        item.sessionId = String(a.sessionId || '') || null
-        await save(workspace, session)
-        return ok({ message: 'Session linked to ' + item.id })
-      }
-      case 'setCode': {
-        const r = setCode(board, String(a.code || ''), true)
-        if (r.error) return fail(r.error)
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      case 'setStatus': {
-        const r = setStatus(board, { id: String(a.id || ''), note: a.note, actor })
-        if (r.error) return fail(r.error)
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      case 'setConfirmRequired': {
-        const r = setConfirmRequired(board, a.value === true)
-        await save(workspace, session)
-        return ok({ message: r.message })
-      }
-      default:
-        return fail('Unknown kanban-flow method: ' + method)
+    let out
+    try {
+      out = await store.mutate(workspace, session, (board) => mutation(board, a, actor))
+    } catch (err) {
+      if (err instanceof BoardUnavailableError) return unavailable(err)
+      throw err
+    }
+    const r = out.result || {}
+    if (r.error) return { ok: false, error: r.error, board: cloneBoard(out.board), warnings: out.warnings }
+    return {
+      ok: true,
+      board: cloneBoard(out.board),
+      persisted: out.persisted,
+      warnings: out.warnings,
+      message: r.message,
+      ...(r.item ? { item: r.item } : {}),
     }
   }
 
@@ -331,14 +234,13 @@ export function apply(ctx) {
         const workspace = await workspaceOfExec(exec)
         if (!workspace) return { ok: false, message: 'Cannot determine the current workspace from the tool execution context', warnings: [] }
         const session = exec && exec.agent && exec.agent.session
-        const board = await boardOf(workspace, session)
         const r = await dispatch(workspace, 'get', args, 'agent', session)
-        const rules = workflowRules(board)
+        if (r.ok === false) return { ok: false, message: r.error || 'Board unavailable', warnings: Array.isArray(r.warnings) ? r.warnings : [] }
         return {
           ok: true,
-          message: r.message + ' (code ' + board.code + ')',
+          message: r.message + ' (code ' + r.board.code + ')' + (r.stale ? ' [stale: the board file is unreachable; changes are disabled]' : ''),
           summary: r.summary,
-          rules,
+          rules: workflowRules(r.board),
           warnings: Array.isArray(r.warnings) ? r.warnings : [],
         }
       },

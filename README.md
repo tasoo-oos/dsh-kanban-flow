@@ -73,6 +73,9 @@ Replying in the item's task session while it is in Review sends the agent back t
 ## Storage & trust
 
 - One JSON file per workspace: `<workspace>/.dsh-kanban-flow.json` — schema-versioned, migrated automatically, corrupt files backed up before being reset. Your board data never leaves the workspace.
+- The file is the source of truth. Every access checks its version and re-reads it after an outside change (`git pull`, another dsh instance). Writes are conditional; a write that loses a race re-reads the file and replays the change.
+- A board that cannot be loaded (for example, an SSH workspace whose connection is down) is never replaced by an empty one: the board shows the last loaded state as read-only, or an error before the first load, and the file is not written until it is reachable again. A damaged file is overwritten only after its backup was written.
+- Files go through the harness filesystem service, so SSH workspaces opened with dsh-ssh keep their board on the remote host.
 - Ships prebuilt: no install-time scripts, no build step on install, and the only network call the client makes is to the plugin's own same-origin `/api/kanban-flow` route.
 
 ## Development

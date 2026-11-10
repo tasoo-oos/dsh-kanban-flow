@@ -44,6 +44,10 @@ export interface FlowResponse {
   board?: Board
   item?: Item
   persisted?: boolean
+  /** The board file is unreachable; `board` is the last loaded state and changes are refused. */
+  stale?: boolean
+  /** The board could not be loaded at all; no `board` accompanies the error. */
+  unavailable?: boolean
   warnings?: string[]
 }
 

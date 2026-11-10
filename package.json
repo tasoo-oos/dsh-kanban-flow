@@ -13,6 +13,7 @@
   "files": [
     "index.js",
     "lib/core.js",
+    "lib/board-store.js",
     "lib/client.js",
     "cordis.patch.yml",
     "assets/screenshot.png",
