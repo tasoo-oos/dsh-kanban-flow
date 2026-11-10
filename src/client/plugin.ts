@@ -12,25 +12,34 @@
 import { createElement as h, useEffect, useSyncExternalStore } from "react"
 import { KanbanBoard } from "./KanbanBoard"
 import { SettingsTab } from "./SettingsPanel"
-import { ArchiveSync, BoardDismiss, BoardOpener, BoardTabToggle, ClickMode, SidebarIcons, getBoardOverride, setBoardOverride, subscribeBoardOverride } from "./Controllers"
+import { ArchiveSync, BoardDismiss, BoardOpener, BoardTabToggle, ClickMode, SidebarIcons, getBoardOverride, openBoardInApp, setBoardOverride, subscribeBoardOverride } from "./Controllers"
 import { initAgentDriver } from "./lib/AgentDriver"
 import { resolveBoardWorkspace } from "./lib/resolve"
+import {
+  sessionsFacade,
+  workspacesFacade,
+  type RawSessions,
+  type RawUiWorkspace,
+  type RawWorkspaces,
+  type SessionsFacade,
+  type WorkspacesFacade,
+} from "./lib/host"
 
 interface WorkspaceSnapshot {
   items: Array<{ workspaceId: string; title: string; sessionIds: string[] }>
   recentWorkspaceId?: string
 }
 
-interface WorkspacesService {
-  list: { getSnapshot(): any; subscribe(fn: () => void): () => void }
-  startSession(workspaceId?: string): void
-  archiveSession?(sessionId: string): Promise<void>
-}
-interface SessionsServiceFull {
-  list: { getSnapshot(): any; subscribe(fn: () => void): () => void }
-  open(sessionId: string): void
-  create(opts?: { workspaceId?: string }): Promise<string>
-  binding(id: string): { session: { rename(title: string): Promise<any>; prompt(content: Array<{ type: string; text: string }>, mode?: string): Promise<any> } } | undefined
+type WorkspacesService = WorkspacesFacade
+type SessionsServiceFull = SessionsFacade
+
+interface ContextMenusService {
+  register(contribution: {
+    id: string
+    target: string
+    order: number
+    resolve(target: { workspaceId?: string }, signal: AbortSignal): Array<{ id: string; label: string; run?: () => void }>
+  }): () => void
 }
 
 function useWorkspaceSnapshot(workspaces: WorkspacesService | undefined): WorkspaceSnapshot {
@@ -98,17 +107,16 @@ function RootControllers(props: { workspaces?: WorkspacesService; sessions?: Ses
     if (!sessions) return
     initAgentDriver({
       createSession: (workspaceId) => sessions.create({ workspaceId }),
-      renameSession: async (sessionId, title) => {
-        const binding = sessions.binding(sessionId)
-        const r = await binding?.session.rename(title)
-        if (r && r.ok === false) console.warn("dsh-kanban-flow: rename failed", r.error)
-      },
-      promptSession: async (sessionId, text) => {
-        const binding = sessions.binding(sessionId)
-        if (!binding) throw new Error("session binding unavailable: " + sessionId)
-        const r = await binding.session.prompt([{ type: "text", text }], "queue")
-        if (r && r.ok === false) throw new Error("prompt failed: " + (r.error && r.error.message))
-      },
+      renameSession: (sessionId, title) =>
+        sessions.withSession(sessionId, async (session) => {
+          const r = await session.rename(title)
+          if (r && r.ok === false) console.warn("dsh-kanban-flow: rename failed", r.error)
+        }),
+      promptSession: (sessionId, text) =>
+        sessions.withSession(sessionId, async (session) => {
+          const r = await session.prompt([{ type: "text", text }], "queue")
+          if (r && r.ok === false) throw new Error("prompt failed: " + (r.error && r.error.message))
+        }),
       archiveSession: async (sessionId) => {
         const archive = props.workspaces?.archiveSession
         if (!archive) throw new Error("workspaces.archiveSession unavailable")
@@ -128,12 +136,16 @@ function RootControllers(props: { workspaces?: WorkspacesService; sessions?: Ses
 
 export const KanbanFlowPlugin = {
   name: "dsh-kanban-flow",
-  inject: ["slots", "workspaces", "sessions"],
+  inject: ["slots", "workspaces", "sessions", "uiWorkspace", "contextMenus"],
   apply(ctx: any) {
     const slots = ctx.get("slots")
     if (slots === undefined) return
-    const workspaces: WorkspacesService | undefined = ctx.get("workspaces")
-    const sessions: SessionsServiceFull | undefined = ctx.get("sessions")
+    const rawWorkspaces: RawWorkspaces | undefined = ctx.get("workspaces")
+    const rawSessions: RawSessions | undefined = ctx.get("sessions")
+    const uiWorkspace: RawUiWorkspace | undefined = ctx.get("uiWorkspace")
+    const contextMenus: ContextMenusService | undefined = ctx.get("contextMenus")
+    const workspaces = rawWorkspaces ? workspacesFacade(rawWorkspaces, uiWorkspace) : undefined
+    const sessions = rawSessions ? sessionsFacade(rawSessions, uiWorkspace) : undefined
 
     // "Board" tab beside conversation views — the in-app board surface.
     slots.inject("conversation.view", () =>
@@ -158,5 +170,21 @@ export const KanbanFlowPlugin = {
         () => h(RootControllers, { workspaces, sessions }),
       ),
     )
+
+    // Workspace row menu (right click / "..." button): a supported entry
+    // point that does not depend on the sidebar markup.
+    if (contextMenus && typeof contextMenus.register === "function") {
+      const register = () => contextMenus.register({
+        id: "kanban-flow.workspace",
+        target: "workspace",
+        order: 150,
+        resolve: (target) =>
+          typeof target?.workspaceId === "string"
+            ? [{ id: "open-board", label: "Open board", run: () => openBoardInApp(target.workspaceId!) }]
+            : [],
+      })
+      if (typeof ctx.effect === "function") ctx.effect(register, "dsh-kanban-flow: workspace menu")
+      else register()
+    }
   },
 }

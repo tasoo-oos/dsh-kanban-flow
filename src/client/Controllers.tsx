@@ -14,14 +14,17 @@
  * lib/resolve.ts for the pin scoping rules) — and switches to native
  * resolution as soon as the workspace gets its own conversation.
  *
- * DSH 0.1.1-rc.2 sidebar markup (anchored defensively — degrade to no-ops):
- * workspace rows are [role=treeitem][aria-expanded] flex rows:
+ * Sidebar markup (anchored defensively — degrade to no-ops): workspace rows
+ * are [role=treeitem][aria-expanded] flex rows:
  * [folder span] [chevron span] [title span (flex:1)] [actions span].
+ * dsh 0.2.x also marks each row with data-row-key="workspace:<id>", which
+ * maps a row to its workspace exactly; older hosts fall back to title order.
  */
 import { useEffect } from "react"
 import { callFlow } from "@/lib/api"
 import { getClickOpensBoard } from "@/lib/store"
 import { matchWorkspaceByTitle, type BoardPin } from "@/lib/resolve"
+import { workspaceIdFromRowKey } from "@/lib/host"
 
 interface WorkspaceSummary {
   workspaceId: string
@@ -44,7 +47,7 @@ interface SessionsListStore {
 interface SessionsService {
   list: SessionsListStore
   open?(sessionId: string): void
-  binding?(id: string): { session: { prompt(content: Array<{ type: string; text: string }>, mode?: string): Promise<any> } } | undefined
+  withSession?<T>(id: string, operation: (session: { prompt(content: Array<{ type: string; text: string }>, mode: "queue" | "steer"): Promise<any> }) => T | Promise<T>): Promise<T>
 }
 
 export interface ControllerProps {
@@ -369,10 +372,8 @@ export function BoardOpener({ workspaces, sessions }: ControllerProps) {
             openingBoard = false
             return
           }
-          const binding = sessions.binding ? sessions.binding(cur) : undefined
-          const seeded = binding?.session.prompt(
-            [{ type: "text", text: "Kanban board bootstrap: reply with the single word \"ready\"." }],
-            "queue",
+          const seeded = sessions.withSession?.(cur, (session) =>
+            session.prompt([{ type: "text", text: "Kanban board bootstrap: reply with the single word \"ready\"." }], "queue"),
           )
           Promise.resolve(seeded).catch((err) => console.warn("dsh-kanban-flow: board seed prompt failed", err))
           settleThen(() => currentNonBlank() !== undefined, finishOpening, 20000)
@@ -461,6 +462,9 @@ function isIconBit(row: HTMLElement, target: EventTarget | null): boolean {
  * titled T (duplicate titles stay distinct).
  */
 function workspaceIdForRow(workspaces: WorkspacesService | undefined, row: HTMLElement): string | null {
+  const keyed = workspaceIdFromRowKey(row.getAttribute("data-row-key"))
+  if (keyed !== null) return keyed
+  if (row.hasAttribute("data-row-key")) return null // ungrouped bucket or another row kind
   const titleSpan = titleSpanOf(row)
   if (!titleSpan) return null
   const title = (titleSpan.textContent || "").trim()

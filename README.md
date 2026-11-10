@@ -91,7 +91,9 @@ CI runs tests, typecheck and build on every push; tagging a version (`v*`) publi
 
 ## Notes
 
-- Built against DSH 0.1.1-rc.2. The sidebar icon and workspace-click behavior anchor on its sidebar markup (no per-row slot exists yet); they degrade to native behavior if the markup changes, and icons only appear in the expanded sidebar.
+- Works with DSH 0.2.x (tested against 0.2.2-rc.1) and keeps the 0.1.x code paths. On 0.2.x the current Session comes from the main-view retention, navigation goes through the `uiWorkspace` service, and task Sessions are retained (`sessions.using`) while the board prompts or renames them.
+- Every workspace row menu (right click or "...") has **Open board**, which does not depend on the sidebar markup.
+- The sidebar icon and workspace-click behavior still anchor on the sidebar markup (no per-row slot exists for workspace rows); on 0.2.x rows are matched by their `data-row-key`. They degrade to native behavior if the markup changes, and icons only appear in the expanded sidebar.
 
 ## Credits & license
 
