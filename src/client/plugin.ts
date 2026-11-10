@@ -11,6 +11,8 @@
  */
 import { createElement as h, useEffect, useSyncExternalStore } from "react"
 import { KanbanBoard } from "./KanbanBoard"
+import { BoardsIcon, BoardsPanel } from "./BoardsPanel"
+import { createOverviewStore } from "./lib/overview"
 import { SettingsTab } from "./SettingsPanel"
 import { ArchiveSync, BoardDismiss, BoardOpener, BoardTabToggle, ClickMode, SidebarIcons, getBoardOverride, openBoardInApp, setBoardOverride, subscribeBoardOverride } from "./Controllers"
 import { initAgentDriver } from "./lib/AgentDriver"
@@ -32,6 +34,13 @@ interface WorkspaceSnapshot {
 
 type WorkspacesService = WorkspacesFacade
 type SessionsServiceFull = SessionsFacade
+
+/** Main panel key and sidebar panel-list id of the global Boards panel. */
+const BOARDS_PANEL_ID = "kanban-flow-boards"
+
+interface LayoutService {
+  selectPanel(panelId: string | null): void
+}
 
 interface ContextMenusService {
   register(contribution: {
@@ -136,7 +145,7 @@ function RootControllers(props: { workspaces?: WorkspacesService; sessions?: Ses
 
 export const KanbanFlowPlugin = {
   name: "dsh-kanban-flow",
-  inject: ["slots", "workspaces", "sessions", "uiWorkspace", "contextMenus"],
+  inject: ["slots", "workspaces", "sessions", "uiWorkspace", "contextMenus", "layout"],
   apply(ctx: any) {
     const slots = ctx.get("slots")
     if (slots === undefined) return
@@ -144,6 +153,7 @@ export const KanbanFlowPlugin = {
     const rawSessions: RawSessions | undefined = ctx.get("sessions")
     const uiWorkspace: RawUiWorkspace | undefined = ctx.get("uiWorkspace")
     const contextMenus: ContextMenusService | undefined = ctx.get("contextMenus")
+    const layout: LayoutService | undefined = ctx.get("layout")
     const workspaces = rawWorkspaces ? workspacesFacade(rawWorkspaces, uiWorkspace) : undefined
     const sessions = rawSessions ? sessionsFacade(rawSessions, uiWorkspace) : undefined
 
@@ -168,6 +178,29 @@ export const KanbanFlowPlugin = {
       slots.register(
         { name: "sidebar.footer.action", id: "kanban-flow-controllers", order: 90 },
         () => h(RootControllers, { workspaces, sessions }),
+      ),
+    )
+
+    // Global Boards panel: every workspace's board on one kanban, opened from
+    // the sidebar panel list (its icon shows how many items wait in Review).
+    const overview = createOverviewStore()
+    const openBoard = (workspaceId: string) => {
+      if (layout && typeof layout.selectPanel === "function") layout.selectPanel(null)
+      openBoardInApp(workspaceId)
+    }
+    const archiveFromPanel = workspaces?.archiveSession
+      ? (sessionId: string) => { void workspaces.archiveSession!(sessionId) }
+      : undefined
+    slots.inject("main", () =>
+      slots.register(
+        { name: "main", key: BOARDS_PANEL_ID },
+        () => h(BoardsPanel, { store: overview, sessions, archiveSession: archiveFromPanel, openBoard }),
+      ),
+    )
+    slots.inject("sidebar.panellist", () =>
+      slots.register(
+        { name: "sidebar.panellist", id: BOARDS_PANEL_ID, order: 30, label: "Boards" },
+        (props: any) => h(BoardsIcon, { size: props && props.size, store: overview }),
       ),
     )
 

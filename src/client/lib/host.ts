@@ -22,6 +22,7 @@ export interface Observable<T> {
 
 export interface SessionRow {
   blank?: boolean
+  running?: boolean
   retainedBy?: Record<string, number | undefined>
 }
 

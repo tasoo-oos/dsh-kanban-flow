@@ -8,7 +8,8 @@
  * Responsibilities:
  *  - One board per workspace, persisted to <workspace.path>/.dsh-kanban-flow.json
  *  - Model tools registered via ctx.tools.register (kanbanflow_*)
- *  - Browser data layer at /api/kanban-flow via ctx.get('webServer')
+ *  - Browser data layer at /api/kanban-flow via ctx.get('webServer'), including
+ *    the cross-workspace `overview` read behind the global Boards panel
  *  - Workflow state machine enforcement with actor tracking (human vs agent)
  *
  * Board schema lives in lib/core.js; file loading, revalidation and
@@ -30,9 +31,15 @@ import {
   deriveCode,
 } from './lib/core.js'
 import { BoardUnavailableError, createBoardStore } from './lib/board-store.js'
+import { boardOverview, mapLimited, unavailableOverview, withTimeout } from './lib/overview.js'
 
 export const name = 'dsh-kanban-flow'
 export const inject = ['tools']
+
+/** Boards loaded at once by the cross-workspace overview. */
+const OVERVIEW_CONCURRENCY = 4
+/** Per-workspace wait before the overview reports a board as unreachable. */
+const OVERVIEW_TIMEOUT_MS = 8000
 
 /** Read-only dispatch methods; everything else mutates through the store. */
 const READ_METHODS = new Set(['get', 'getMeta', 'getItem'])
@@ -146,6 +153,25 @@ export function apply(ctx) {
       message: r.message,
       ...(r.item ? { item: r.item } : {}),
     }
+  }
+
+  // ---- cross-workspace overview (global Boards panel) ----
+  const overview = async () => {
+    const registry = getWorkspaceRegistry()
+    const list = registry && typeof registry.list === 'function' ? registry.list() : []
+    const workspaces = await mapLimited(list, OVERVIEW_CONCURRENCY, async (workspace) => {
+      try {
+        const snap = await withTimeout(
+          store.read(workspace),
+          OVERVIEW_TIMEOUT_MS,
+          'Board file did not answer within ' + OVERVIEW_TIMEOUT_MS / 1000 + 's',
+        )
+        return boardOverview(workspace, snap)
+      } catch (err) {
+        return unavailableOverview(workspace, (err && err.message) || err)
+      }
+    })
+    return { ok: true, generatedAt: new Date().toISOString(), workspaces }
   }
 
   // ---- tool execution context -> workspace ----
@@ -358,6 +384,11 @@ export function apply(ctx) {
       const body = raw ? JSON.parse(raw) : {}
       const method = typeof body.method === 'string' ? body.method : 'get'
       const args = body.args || {}
+      if (method === 'overview') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(await overview()))
+        return
+      }
       const workspaceId = typeof args.workspaceId === 'string' ? args.workspaceId : ''
       const workspace = workspaceId ? workspaceOfId(workspaceId) : undefined
       if (!workspace) {

@@ -48,6 +48,12 @@ Replying in the item's task session while it is in Review sends the agent back t
 - A kanban icon next to every workspace in the sidebar; workspace clicks open boards (toggleable back to session expansion in **Settings → Plugins → Kanban Flow**)
 - Board views poll every 3s, so agent moves appear on the board while you watch
 
+**All boards in one place**
+- **Boards** in the sidebar panel list opens one five-column board with the items of every workspace; each card shows its workspace, latest activity and the agent's status note, and a dot while its task session runs
+- Review is ordered as a queue (longest waiting first), and the sidebar icon shows how many items wait in Review across all workspaces
+- Drag cards between columns (To Do starts the agent pickup, as on the workspace board), create items in any workspace, filter by workspace, and click a card to open its task session
+- A workspace whose board cannot be reached (for example, an SSH host that is down) is listed as unreachable instead of hiding the others; each board answers within 8 seconds or is reported as unreachable
+
 **One agent session per item**
 - Pickup creates a task session named `CODE-12 · Item name` — click a card to jump straight into it
 - Progress narration lives in that session; each card shows a compact latest-activity line ("harness moved to Done · 3 seconds ago")

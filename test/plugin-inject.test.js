@@ -52,6 +52,6 @@ describe('KanbanFlowPlugin dependency contract', () => {
       effect: () => () => undefined,
     }
     KanbanFlowPlugin.apply(ctx)
-    expect(registered.sort()).toEqual(['conversation.view', 'settings.plugins.tab', 'sidebar.footer.action'])
+    expect(registered.sort()).toEqual(['conversation.view', 'main', 'settings.plugins.tab', 'sidebar.footer.action', 'sidebar.panellist'])
   })
 })
